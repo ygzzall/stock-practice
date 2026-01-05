@@ -2,277 +2,342 @@ import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="V10.1 Eğitimli Kokpit", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="Finans Asistanı", layout="wide")
+st.title("Finans Asistanı")
+st.markdown("Finans Asistanı ile bilgi birikimlerinizi arttırabilirsiniz. Yatırım Tavsiyesi Değildir!")
 
-# --- BAŞLIK ---
-st.title("Borsa Pratiği Botu")
-st.markdown("Hisse, Kripto, Emtia ve **Detaylı İndikatör Eğitimi**")
-
-# --- SIDEBAR ---
-st.sidebar.header("⚙️ Ayarlar")
-
-piyasa_secimi = st.sidebar.selectbox(
-    "Piyasa Seçiniz:",
-    [
-        "📊 Borsa Endeksleri (Dünya)",
-        "🏆 Emtia (Altın/Petrol/Metal)",
-        "🌎 Yabancı Fonlar (ETF)",
-        "🇹🇷 BIST (Hisse)",
-        "🇺🇸 ABD (Hisse)",
-        "₿ Kripto"
-    ]
+# ==========================================
+# 1. AYARLAR
+# ==========================================
+st.sidebar.header("Yatırımcı Profili")
+profil = st.sidebar.radio(
+    "Tarzın Nedir?",
+    [" - Kısa Vadeli Yatırımcı", " - Orta Vadeli Yatırımcı", " - Uzun Vadeli Yatırımcı"]
 )
 
-# --- AKILLI SEÇİM MANTIĞI ---
+if "Scalper" in profil:
+    ma_tur, kisa, uzun, atr_kat, vade = "EMA", 9, 21, 1.5, "6mo"
+elif "Trader" in profil:
+    ma_tur, kisa, uzun, atr_kat, vade = "SMA", 50, 200, 2.5, "2y"
+else:
+    ma_tur, kisa, uzun, atr_kat, vade = "SMA", 100, 200, 3.5, "5y"
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔎 Piyasa Seçimi")
+piyasa = st.sidebar.selectbox("Piyasa:", ["BIST (Hisse)", "Kripto", "ABD Borsası", "Emtia", "Endeksler"])
+
+# --- DEĞİŞKEN TANIMLAMALARI (Hata Önleyici) ---
 secilen_sembol = ""
 sembol_adi = ""
+arama_terimi = ""
 
-if piyasa_secimi == "📊 Borsa Endeksleri (Dünya)":
-    endeksler = {
-        "🇹🇷 BIST 100 (Genel)": "XU100.IS",
-        "🇹🇷 BIST 30 (Devler)": "XU030.IS",
-        "🇹🇷 BIST Banka": "XBANK.IS",
-        "🇺🇸 S&P 500 (ABD Devleri)": "^GSPC",
-        "🇺🇸 Nasdaq (Teknoloji)": "^NDX",
-        "🇺🇸 Dow Jones (Sanayi)": "^DJI",
-        "🇩🇪 DAX (Almanya)": "^GDAXI",
-        "😨 VIX (Korku Endeksi)": "^VIX"
-    }
-    secim = st.sidebar.selectbox("Endeks Seçiniz:", list(endeksler.keys()))
-    secilen_sembol = endeksler[secim]
+if piyasa == "BIST (Hisse)":
+    raw_sym = st.sidebar.text_input("Kod (Örn: THYAO):", "THYAO").upper()
+    secilen_sembol = raw_sym + ".IS"
+    sembol_adi = raw_sym
+    arama_terimi = f"{raw_sym} Hisse Haberleri"
+elif piyasa == "Kripto":
+    raw_sym = st.sidebar.text_input("Kod (Örn: BTC):", "BTC").upper()
+    secilen_sembol = raw_sym + "-USD"
+    sembol_adi = raw_sym
+    arama_terimi = f"{raw_sym} Kripto Haber"
+elif piyasa == "Emtia":
+    liste = {"Altın": "GC=F", "Petrol": "CL=F"}
+    secim = st.sidebar.selectbox("Seç:", list(liste.keys()))
+    secilen_sembol = liste[secim]
     sembol_adi = secim
-
-elif piyasa_secimi == "🏆 Emtia (Altın/Petrol/Metal)":
-    emtialar = {
-        "🟡 Altın (Ons)": "GC=F",
-        "⚪ Gümüş (Ons)": "SI=F",
-        "🛢️ Ham Petrol (WTI)": "CL=F",
-        "🛢️ Brent Petrol": "BZ=F",
-        "⛽ Doğalgaz": "NG=F",
-        "🥉 Bakır": "HG=F"
-    }
-    secim = st.sidebar.selectbox("Emtia Seçiniz:", list(emtialar.keys()))
-    secilen_sembol = emtialar[secim]
+    arama_terimi = f"{secim} Piyasa Haberleri"
+elif piyasa == "Endeksler":
+    liste = {"BIST 100": "XU100.IS", "S&P 500": "^GSPC", "DAX": "^GDAXI"}
+    secim = st.sidebar.selectbox("Seç:", list(liste.keys()))
+    secilen_sembol = liste[secim]
     sembol_adi = secim
-
-elif piyasa_secimi == "🌎 Yabancı Fonlar (ETF)":
-    etfler = {
-        "🏛 SPY - S&P 500 Fonu": "SPY",
-        "💻 QQQ - Nasdaq Fonu": "QQQ",
-        "🌍 VT - Dünya Borsaları": "VT",
-        "🟡 GLD - Altın Fonu": "GLD",
-        "⚪ SLV - Gümüş Fonu": "SLV"
-    }
-    secim = st.sidebar.selectbox("Fon Seçiniz:", list(etfler.keys()))
-    secilen_sembol = etfler[secim]
-    sembol_adi = secim
-
-elif piyasa_secimi == "🇹🇷 BIST (Hisse)":
-    giris = st.sidebar.text_input("Hisse Kodu (Örn: THYAO):", value="THYAO").upper()
-    secilen_sembol = giris + ".IS" if ".IS" not in giris else giris
-    sembol_adi = giris
-
-elif piyasa_secimi == "🇺🇸 ABD (Hisse)":
-    giris = st.sidebar.text_input("Hisse Kodu (Örn: AAPL):", value="AAPL").upper()
-    secilen_sembol = giris
-    sembol_adi = giris
-
-elif piyasa_secimi == "₿ Kripto":
-    giris = st.sidebar.text_input("Coin Kodu (Örn: BTC):", value="BTC").upper()
-    secilen_sembol = giris + "-USD" if "-USD" not in giris else giris
-    sembol_adi = giris
-
-vade_secimi = st.sidebar.selectbox("Vade Seçiniz:",
-                                   ["1 Hafta (15dk)", "1 Ay (Saatlik)", "6 Ay (Günlük)", "1 Yıl (Günlük)"])
+    arama_terimi = f"{secim} Borsa Haberleri"
+else:
+    raw_sym = st.sidebar.text_input("Kod (Örn: AAPL):", "AAPL").upper()
+    secilen_sembol = raw_sym
+    sembol_adi = raw_sym
+    arama_terimi = f"{raw_sym} Stock News"
 
 
-# --- VERİ ÇEKME ---
-def veri_getir(sembol, vade):
-    if "1 Hafta" in vade:
-        p, i = "5d", "15m"
-    elif "1 Ay" in vade:
-        p, i = "1mo", "60m"
-    elif "6 Ay" in vade:
-        p, i = "6mo", "1d"
-    else:
-        p, i = "1y", "1d"
-    return yf.Ticker(sembol).history(period=p, interval=i)
+# ==========================================
+# 2. ANALİZ MOTORU
+# ==========================================
+class AnalizMotoru:
+    def veriyi_hazirla(self, df, kisa, uzun, tur):
+        if len(df) < uzun: return None
+
+        # Trend
+        if tur == "SMA":
+            df.ta.sma(length=kisa, append=True)
+            df.ta.sma(length=uzun, append=True)
+            df['MA_Short'] = df[f'SMA_{kisa}']
+            df['MA_Long'] = df[f'SMA_{uzun}']
+        else:
+            df.ta.ema(length=kisa, append=True)
+            df.ta.ema(length=uzun, append=True)
+            df['MA_Short'] = df[f'EMA_{kisa}']
+            df['MA_Long'] = df[f'EMA_{uzun}']
+
+        # Göstergeler
+        df.ta.atr(length=14, append=True)
+        df.ta.adx(length=14, append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.bbands(length=20, std=2, append=True)
+
+        # Hacim Ortalaması
+        df['Vol_SMA'] = df['Volume'].rolling(20).mean()
+
+        # Mum Formasyonu
+        body = abs(df['Open'] - df['Close'])
+        lower = df[['Open', 'Close']].min(axis=1) - df['Low']
+        upper = df['High'] - df[['Open', 'Close']].max(axis=1)
+        df['Hammer'] = (lower > body * 2) & (upper < body * 0.5)
+
+        return df.dropna()
+
+    def sinyal_uret(self, df, atr_kat):
+        trades, buys, sells = [], [], []
+        in_pos = False
+        entry_price = 0.0
+        stop_loss = 0.0
+        highest = 0.0
+        live_status = "NÖTR"
+        live_stop = 0.0
+
+        for i in range(1, len(df)):
+            row = df.iloc[i]
+            prev = df.iloc[i - 1]
+            price = row['Close']
+            atr = row['ATRr_14']
+            date = df.index[i]
+
+            trend_up = (row['MA_Short'] > row['MA_Long']) or (price > row['MA_Short'])
+            trend_down = (price < row['MA_Short']) and (row['MA_Short'] < row['MA_Long'])
+
+            trigger = ((prev['RSI_14'] < 30) and (row['RSI_14'] > 30)) or row['Hammer']
+            power = row['ADX_14'] > 20
+
+            if in_pos:
+                stop_hit = row['Low'] <= stop_loss
+                trend_exit = trend_down
+                force_exit = (i == len(df) - 1)
+
+                if stop_hit or trend_exit or force_exit:
+                    in_pos = False
+                    if stop_hit:
+                        exit_price = stop_loss
+                        reason = 'SATIŞ (Stop)'
+                    elif trend_exit:
+                        exit_price = price
+                        reason = 'SATIŞ (Trend)'
+                    else:
+                        exit_price = price
+                        reason = 'SATIŞ (Kapanış)'
+
+                    pnl = (exit_price - entry_price) / entry_price
+                    trades.append({'Tarih': date, 'İşlem': reason, 'Fiyat': exit_price, 'Sonuç': pnl})
+                    sells.append({'Date': date, 'Price': exit_price})
+                    live_status = "NÖTR"
+                else:
+                    if row['High'] > highest:
+                        highest = row['High']
+                        new_stop = highest - (atr * atr_kat)
+                        if new_stop > stop_loss: stop_loss = new_stop
+                    live_stop = stop_loss
+                    live_status = "ALIMDA"
+            else:
+                if trend_up and power and trigger:
+                    in_pos = True
+                    entry_price = price
+                    highest = price
+                    stop_loss = price - (atr * atr_kat)
+                    trades.append({'Tarih': date, 'İşlem': 'ALIŞ', 'Fiyat': price, 'Sonuç': 0})
+                    buys.append({'Date': date, 'Price': price})
+                    live_stop = stop_loss
+                    live_status = "ALIMDA"
+
+        return trades, buys, sells, live_status, live_stop
 
 
-# --- YORUM MOTORU ---
-def detayli_yorum_uret(df):
-    df.ta.rsi(length=14, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df.ta.supertrend(length=10, multiplier=3, append=True)
-    df.ta.sma(length=50, append=True)
-    df.ta.bbands(length=20, std=2, append=True)
-    df.ta.mfi(length=14, append=True)
-
+# ==========================================
+# 3. YORUMCU (DÜZELTİLMİŞ)
+# ==========================================
+def detayli_yorum_getir(df, status, live_stop, atr_kat):
     son = df.iloc[-1]
     fiyat = son['Close']
-    rsi = son['RSI_14']
-    mfi = son['MFI_14']
-    macd = son['MACD_12_26_9']
-    macd_sinyal = son['MACDs_12_26_9']
+    ma_long = son['MA_Long']
+    atr = son['ATRr_14']
+    vol = son['Volume']
+    vol_sma = son.get('Vol_SMA', vol)  # Hata önleyici
+    sma50 = son.get('SMA_50', son['MA_Short'])
 
-    st_col = [c for c in df.columns if c.startswith('SUPERT_')][0]
-    sma_col = [c for c in df.columns if c.startswith('SMA_50')][0]
-    bbu_col = [c for c in df.columns if c.startswith('BBU_')][0]
-    bbl_col = [c for c in df.columns if c.startswith('BBL_')][0]
+    # --- HATA DÜZELTMESİ: SÜTUN İSMİNİ OTOMATİK BUL ---
+    # Bazen 'BBU_20_2.0' bazen 'BBU_20_2' oluyor. Otomatik buluyoruz:
+    cols = df.columns
+    bbu_col = [c for c in cols if c.startswith('BBU')][0]
+    bbl_col = [c for c in cols if c.startswith('BBL')][0]
 
-    supertrend = son[st_col]
-    sma50 = son[sma_col]
-    bb_ust = son[bbu_col]
-    bb_alt = son[bbl_col]
+    bb_upper = son[bbu_col]
+    bb_lower = son[bbl_col]
 
-    # Trend
-    trend_txt = ""
-    trend_puan = 0
-    if fiyat > sma50:
-        trend_txt += "Fiyat 50 günlük ortalamanın üzerinde (Pozitif). "
-        trend_puan += 25
+    # 1. Trend Analizi
+    if fiyat > ma_long:
+        trend_msg = f"Fiyat Ana Trendin ({ma_long:.2f}) üzerinde. Piyasa **BOĞA (Yükseliş)** karakterinde."
+        trend_icon = "🟢"
     else:
-        trend_txt += "Fiyat ortalamanın altında (Negatif). "
+        trend_msg = f"Fiyat Ana Trendin ({ma_long:.2f}) altında. Piyasa **AYI (Düşüş)** baskısında."
+        trend_icon = "🔴"
 
-    if fiyat > supertrend:
-        trend_txt += "SuperTrend AL sinyali veriyor."
-        trend_puan += 25
+    # 2. Risk & Stop
+    stop_mesafe = atr * atr_kat
+    risk_msg = f"ATR Volatilitesi: {atr:.2f}. Güvenli stop mesafesi şu anki fiyattan {stop_mesafe:.2f} birim aşağıdadır."
+
+    # 3. Hacim Teyidi
+    if vol > vol_sma * 1.2:
+        vol_msg = "Hacim, ortalamanın %20 üzerinde. Mevcut hareket **güçlü ve iştahlı** (Gerçek)."
+    elif vol < vol_sma * 0.8:
+        vol_msg = "Hacim ortalamanın altında. Yükseliş veya düşüş **cılız kalabilir** (Tuzak ihtimali)."
     else:
-        trend_txt += "SuperTrend direnci kırılamadı."
+        vol_msg = "Hacim standart seviyelerde, olağandışı bir para girişi/çıkışı yok."
 
-    # Momentum
-    mom_txt = ""
-    if rsi > 70:
-        mom_txt += f"RSI {rsi:.1f} (Aşırı Pahalı/Şişkin). "
-    elif rsi < 30:
-        mom_txt += f"RSI {rsi:.1f} (Aşırı Ucuz/Dip). "
+    # 4. Sıkışma / Patlama
+    bb_width = (bb_upper - bb_lower) / sma50
+    if bb_width < 0.10:
+        sqz_msg = "Bollinger bantları çok daraldı (Sıkışma). **Sert bir patlama (Kırılım) çok yakın!**"
     else:
-        mom_txt += "RSI nötr. "
+        sqz_msg = "Volatilite normal, bantlar açık. Olağan dalgalanma sürüyor."
 
-    if macd > macd_sinyal:
-        mom_txt += "MACD Al verdi."
-        trend_puan += 25
+    # 5. Aksiyon
+    if status == "ALIMDA":
+        action_msg = f"Sistem **ALIMDA**. Stop seviyen **{live_stop:.2f}**. Fiyat bunun altına inmedikçe trendi sür."
     else:
-        mom_txt += "MACD Sat verdi."
+        action_msg = "Sistem **BEKLEMEDE**. Henüz güvenli bir giriş sinyali oluşmadı."
 
-    # Risk
-    risk_txt = ""
-    if fiyat > bb_ust:
-        risk_txt += "Fiyat Bollinger üstünü deldi, düzeltme gelebilir."
-    elif fiyat < bb_alt:
-        risk_txt += "Fiyat Bollinger altına sarktı, tepki gelebilir."
-    else:
-        risk_txt += "Volatilite normal."
-
-    if mfi > 50: trend_puan += 25
-
-    if trend_puan >= 75:
-        karar = "GÜÇLÜ AL 🚀"
-    elif 50 <= trend_puan < 75:
-        karar = "AL / TUT ✅"
-    elif 25 <= trend_puan < 50:
-        karar = "İZLE / BEKLE 👀"
-    else:
-        karar = "SAT / UZAK DUR ❌"
-
-    return df, trend_txt, mom_txt, risk_txt, karar, trend_puan
+    return trend_msg, trend_icon, risk_msg, vol_msg, sqz_msg, action_msg
 
 
-# --- GRAFİK ---
-def grafik_ciz(df, baslik):
-    st_col = [c for c in df.columns if c.startswith('SUPERT_')][0]
-    sma_col = [c for c in df.columns if c.startswith('SMA_50')][0]
-    bbu_col = [c for c in df.columns if c.startswith('BBU_')][0]
-    bbl_col = [c for c in df.columns if c.startswith('BBL_')][0]
-    macd_col = [c for c in df.columns if c.startswith('MACD_')][0]
-    macdh_col = [c for c in df.columns if c.startswith('MACDh_')][0]
-    macds_col = [c for c in df.columns if c.startswith('MACDs_')][0]
-
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.50, 0.15, 0.15, 0.20],
-                        subplot_titles=(f"{baslik} Fiyat & Bollinger", "RSI (Güç)", "MFI (Para)", "MACD (Trend)"))
-
-    fig.add_trace(
-        go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Fiyat"),
-        row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df[sma_col], line=dict(color='orange', width=2), name="SMA 50"), row=1,
-                  col=1)
-    fig.add_trace(
-        go.Scatter(x=df.index, y=df[st_col], line=dict(color='red', width=1.5, dash='dot'), name="SuperTrend"), row=1,
-        col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df[bbu_col], line=dict(color='gray', width=1, dash='dash'), name="BB Üst"),
-                  row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df[bbl_col], line=dict(color='gray', width=1, dash='dash'), fill='tonexty',
-                             name="BB Alt"), row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
-
-    fig.add_trace(go.Scatter(x=df.index, y=df['MFI_14'], line=dict(color='blue', width=2), name="MFI"), row=3, col=1)
-    fig.add_hline(y=20, line_dash="dot", line_color="green", row=3, col=1)
-    fig.add_hline(y=80, line_dash="dot", line_color="red", row=3, col=1)
-
-    colors = ['green' if val >= 0 else 'red' for val in df[macdh_col]]
-    fig.add_trace(go.Bar(x=df.index, y=df[macdh_col], marker_color=colors, name="MACD Hist"), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df[macd_col], line=dict(color='black', width=1), name="MACD"), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df[macds_col], line=dict(color='orange', width=1), name="Sinyal"), row=4,
-                  col=1)
-
-    fig.update_layout(height=900, xaxis_rangeslider_visible=False, showlegend=False,
-                      margin=dict(l=10, r=10, t=30, b=10))
-    return fig
-
-
-# --- ÇALIŞTIR ---
-if st.sidebar.button("Analiz Et 🚀"):
-    with st.spinner(f"{sembol_adi} verileri çekiliyor..."):
+# ==========================================
+# 4. HABER MOTORU
+# ==========================================
+class HaberMotoru:
+    def google_haberleri_getir(self, anahtar_kelime):
+        rss_url = f"https://news.google.com/rss/search?q={anahtar_kelime}&hl=tr-TR&gl=TR&ceid=TR:tr"
         try:
-            df = veri_getir(secilen_sembol, vade_secimi)
+            response = requests.get(rss_url, timeout=5)
+            if response.status_code == 200:
+                root = ET.fromstring(response.content)
+                haberler = []
+                for item in root.findall('./channel/item')[:8]:
+                    haberler.append({
+                        'baslik': item.find('title').text,
+                        'link': item.find('link').text,
+                        'tarih': item.find('pubDate').text
+                    })
+                return haberler
+            return []
+        except:
+            return []
 
-            if df is None or len(df) < 10:
-                st.error("❌ Veri bulunamadı. Piyasa kapalı olabilir.")
-            else:
-                df, t_txt, m_txt, r_txt, karar, puan = detayli_yorum_uret(df)
 
-                # Başlık & Metrikler
-                st.header(f"📊 Analiz: {sembol_adi}")
+# ==========================================
+# 5. UYGULAMA
+# ==========================================
+if st.sidebar.button("Analiz Et 🚀"):
+    with st.spinner("Piyasa röntgeni çekiliyor..."):
+        try:
+            p_map = {"6mo": "6mo", "2y": "2y", "5y": "5y"}
+            df = yf.Ticker(secilen_sembol).history(period=p_map[vade], interval="1d")
+
+            if df.empty:
+                st.error(f"Veri yok. Sembol: {secilen_sembol}")
+                st.stop()
+
+            # Analiz
+            motor = AnalizMotoru()
+            df = motor.veriyi_hazirla(df, kisa, uzun, ma_tur)
+            trades, buys, sells, status, live_stop = motor.sinyal_uret(df, atr_kat)
+
+            # Yorum (5 Madde) - Artık hata vermez
+            t_msg, t_ico, r_msg, v_msg, s_msg, a_msg = detayli_yorum_getir(df, status, live_stop, atr_kat)
+
+            # Haber
+            haber_botu = HaberMotoru()
+            haberler = haber_botu.google_haberleri_getir(arama_terimi)
+
+            # --- EKRAN ---
+            tab1, tab2, tab3 = st.tabs(["📊 5-Boyutlu Analiz", "📜 Backtest", "📰 Haberler"])
+
+            with tab1:
+                last_price = df['Close'].iloc[-1]
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Skor", f"{puan}/100")
-                c2.metric("Karar", karar)
-                c3.metric("Son Fiyat", f"{df['Close'].iloc[-1]:.2f}")
+                c1.metric("Fiyat", f"{last_price:.2f}")
+                c2.metric("Trend", t_ico)
 
-                # Yorum Kartları
-                with st.expander("🌊 1. Trend Analizi", expanded=True):
-                    st.write(t_txt)
-                with st.expander("🚀 2. Momentum (Güç)", expanded=True):
-                    st.write(m_txt)
-                with st.expander("🛡️ 3. Risk Durumu", expanded=True):
-                    st.write(r_txt)
+                if status == "ALIMDA":
+                    c3.metric("Stop", f"{live_stop:.2f}", delta_color="inverse")
+                    st.success(f"**SONUÇ:** {a_msg}")
+                else:
+                    c3.metric("Durum", "NÖTR")
+                    st.warning(f"**SONUÇ:** {a_msg}")
+
+                with st.expander("🧠 Yapay Zeka Detaylı Raporu (Oku)", expanded=True):
+                    st.markdown(f"""
+                    * **🌊 Trend:** {t_msg}
+                    * **🛡️ Risk Yönetimi:** {r_msg}
+                    * **📊 Hacim Teyidi:** {v_msg}
+                    * **💥 Sıkışma (Squeeze):** {s_msg}
+                    """)
 
                 # Grafik
-                st.plotly_chart(grafik_ciz(df, sembol_adi), use_container_width=True)
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                                   name="Fiyat"))
+                fig.add_trace(
+                    go.Scatter(x=df.index, y=df['MA_Long'], line=dict(color='black', width=2), name="Ana Trend"))
+                if buys: fig.add_trace(
+                    go.Scatter(x=[x['Date'] for x in buys], y=[x['Price'] for x in buys], mode='markers', name='AL',
+                               marker=dict(color='green', size=12, symbol='triangle-up')))
+                if sells: fig.add_trace(
+                    go.Scatter(x=[x['Date'] for x in sells], y=[x['Price'] for x in sells], mode='markers', name='SAT',
+                               marker=dict(color='red', size=12, symbol='triangle-down')))
+                fig.update_layout(height=500, title=f"{sembol_adi} Analiz Grafiği", template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
 
-                # --- YENİ EKLENEN EĞİTİM BÖLÜMÜ ---
-                with st.expander("📚 Teknik Sözlük: İndikatörler Ne Anlama Geliyor?", expanded=True):
-                    st.markdown("""
-                    ### 1. Grafikteki Çizgiler
-                    * **🟠 SMA 50 (Turuncu Çizgi):** *Basit Hareketli Ortalama.* Fiyatın son 50 mumdaki ortalamasıdır. Fiyat turuncu çizginin üzerindeyse trend **Yükseliş**, altındaysa **Düşüş** yönündedir.
-                    * **🔴 SuperTrend (Kırmızı Noktalar):** *Trend Takipçisi.* Fiyat bu noktaların altına düşerse "Stop Ol" (Zarar Kes) sinyali üretir. Noktalar fiyatın üstündeyse düşüş, altındaysa yükseliş trendi vardır.
-                    * **⬜ Bollinger Bantları (Gri Alan):** *Volatilite Kanalı.* Fiyat genelde bu gri alanın içinde hareket eder.
-                        * **Üst Banda Değerse:** Fiyat pahalıdır, düzeltme gelebilir.
-                        * **Alt Banda Değerse:** Fiyat ucuzdur, tepki gelebilir.
+            with tab2:
+                if trades:
+                    satislar = [t for t in trades if 'SATIŞ' in t['İşlem']]
+                    if satislar:
+                        karli = len([t for t in satislar if t['Sonuç'] > 0])
+                        basari = (karli / len(satislar) * 100)
 
-                    ### 2. Alttaki Paneller
-                    * **🟣 RSI (Göreceli Güç Endeksi):** *Hız Göstergesi.* 0 ile 100 arasındadır.
-                        * **70 Üstü:** Piyasa aşırı coşkulu (Pahalı). Satış yiyebilir.
-                        * **30 Altı:** Piyasa aşırı ölü (Ucuz). Alım fırsatı olabilir.
-                    * **🔵 MFI (Para Akış Endeksi):** *Hacim Göstergesi.* RSI'ın "Hacim" eklenmiş halidir. Fiyat yükselirken MFI da yükseliyorsa bu yükseliş sağlıklıdır (Para girişi vardır).
-                    * **📊 MACD (Trend Gücü):** *Kesişim Göstergesi.* Siyah çizgi, Turuncu çizgiyi **YUKARI** keserse "AL", **AŞAĞI** keserse "SAT" sinyalidir. Histogram (Çubuklar) yeşilse alıcılar, kırmızıysa satıcılar güçlüdür.
-                    """)
+                        st.metric("Başarı Oranı", f"%{basari:.1f}")
+
+                        df_t = pd.DataFrame(trades)
+                        df_t['Sonuç'] = df_t['Sonuç'].apply(lambda x: f"%{x * 100:.2f}" if x != 0 else "-")
+                        st.dataframe(df_t, use_container_width=True)
+                    else:
+                        st.warning("Henüz kapanmış işlem yok.")
+                else:
+                    st.info("İşlem yok.")
+
+            with tab3:
+                st.subheader("Son Gelişmeler")
+                if haberler:
+                    for h in haberler:
+                        st.markdown(f"**[{h['baslik']}]({h['link']})**")
+                        st.caption(f"📅 {h['tarih']}")
+                        st.markdown("---")
+                else:
+                    st.warning("Haber bulunamadı.")
 
         except Exception as e:
             st.error(f"Hata: {e}")
