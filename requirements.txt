@@ -1,4 +1,6 @@
 streamlit
+uvicorn
+fastapi
 yfinance
 pandas
 pandas_ta
