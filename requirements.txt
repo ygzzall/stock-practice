@@ -5,4 +5,3 @@ pandas_ta
 pandas
 requests
 beautifulsoup4
-streamlit
