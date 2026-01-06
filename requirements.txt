@@ -1,7 +1,7 @@
-streamlit
-uvicorn
 fastapi
+uvicorn
 yfinance
-pandas
 pandas_ta
-plotly
+pandas
+requests
+beautifulsoup4
