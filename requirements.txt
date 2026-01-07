@@ -9,3 +9,4 @@ plotly
 streamlit
 borsapy
 lxml
+html5lib
