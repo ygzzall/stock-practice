@@ -5,32 +5,70 @@ import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 import borsapy as bp
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# ==========================================
-# 🚀 API AYARLARI (V28.0 Final)
-# ==========================================
 app = FastAPI(
     title="Pro Terminal API",
-    description="Backtest + Grafik + Takvim + Haberler",
-    version="28.0"
+    description="Ali Perşembe Stratejileri + 5 Piyasa + Haberler + Takvim",
+    version="36.0"
 )
 
 # ==========================================
-# 1. SAĞLAMLAŞTIRILMIŞ TAKVİM MOTORU
+# 1. FON MOTORU (TEFAS / BORSAPY)
+# ==========================================
+class FonMotoru:
+    def getir(self, kod):
+        try:
+            tefas = bp.Tefas()
+            bitis = datetime.now()
+            baslangic = bitis - timedelta(days=365*2) # 2 Yıllık veri al
+            
+            # Veriyi çek
+            df = tefas.get_history(kod, start=baslangic, end=bitis)
+            if df is None or df.empty: return None
+            
+            # Sütun isimlerini küçük harfe çevir ve temizle
+            df.columns = [c.lower() for c in df.columns]
+            
+            # Tarih index ayarla
+            if 'tarih' in df.columns:
+                df['Date'] = pd.to_datetime(df['tarih'])
+                df.set_index('Date', inplace=True)
+            
+            # Fiyat sütununu bul ve 'Close' yap
+            col_map = {'fiyat': 'Close', 'price': 'Close', 'değer': 'Close'}
+            for tr, en in col_map.items():
+                if tr in df.columns: df.rename(columns={tr: 'Close'}, inplace=True)
+            
+            if 'Close' not in df.columns: return None
+            
+            # OHLC Verilerini Doldur (Fonlarda tek fiyat vardır)
+            df['Open'] = df['Close']
+            df['High'] = df['Close']
+            df['Low'] = df['Close']
+            df['Volume'] = 1000000 # Sanal hacim
+            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+            
+            return df.dropna()
+        except Exception as e:
+            print(f"Fon Hatası: {e}")
+            return None
+
+# ==========================================
+# 2. TAKVİM MOTORU (SAĞLAMLAŞTIRILMIŞ)
 # ==========================================
 class TakvimMotoru:
     def getir(self):
         veriler = []
         try:
-            # 1. YÖNTEM: Borsapy Kütüphanesi
+            # Borsapy'den çekmeyi dene
             cal = bp.EconomicCalendar()
             df = cal.events(period="1w") 
             
             if not df.empty:
                 for _, row in df.iterrows():
                     onem = str(row.get('Importance', '1'))
-                    # Sadece Orta (2) ve Yüksek (3) önemlileri al
+                    # Sadece Orta ve Yüksek önemlileri al
                     if onem in ['2', '3', 'High', 'Medium']:
                         veriler.append({
                             "saat": str(row.get('Time', '00:00')),
@@ -39,27 +77,26 @@ class TakvimMotoru:
                             "onem": "Yüksek" if onem in ['3', 'High'] else "Orta"
                         })
             
-            # Eğer boş döndüyse hata fırlat (Yedeğe geçsin)
             if not veriler: raise Exception("Borsapy boş veri döndü")
-            
             return veriler[:20]
 
         except Exception as e:
-            print(f"Takvim Hatası (Yedek Devrede): {e}")
-            # 2. YÖNTEM: YEDEK MANUEL LİSTE
+            # Hata olursa YEDEK LİSTE döndür (Uygulama çökmesin)
+            print(f"Takvim Hatası: {e}")
             return [
                 {"saat": "15:30", "ulke": "ABD", "olay": "Tarım Dışı İstihdam (Tahmin)", "onem": "Yüksek"},
                 {"saat": "16:00", "ulke": "ABD", "olay": "İşsizlik Oranı", "onem": "Yüksek"},
                 {"saat": "21:00", "ulke": "ABD", "olay": "FED Faiz Kararı", "onem": "Yüksek"},
                 {"saat": "10:00", "ulke": "TUR", "olay": "Enflasyon Verisi (TÜFE)", "onem": "Yüksek"},
-                {"saat": "⚠️", "ulke": "Sistem", "olay": "Canlı Veri Çekilemedi (Manuel Mod)", "onem": "Düşük"}
+                {"saat": "⚠️", "ulke": "Sistem", "olay": "Canlı Veri Çekilemedi (Yedek Mod)", "onem": "Düşük"}
             ]
 
 # ==========================================
-# 2. HABER MOTORU (Google RSS)
+# 3. HABER MOTORU (GOOGLE RSS)
 # ==========================================
 class HaberMotoru:
     def getir(self, terim: str):
+        # Google News RSS (Türkçe)
         rss_url = f"https://news.google.com/rss/search?q={terim}&hl=tr-TR&gl=TR&ceid=TR:tr"
         try:
             response = requests.get(rss_url, timeout=5)
@@ -77,145 +114,158 @@ class HaberMotoru:
         except: return []
 
 # ==========================================
-# 3. GELİŞMİŞ ANALİZ MOTORU
+# 4. ALİ PERŞEMBE ANALİZ MOTORU
 # ==========================================
 class AnalizMotoru:
-    def veriyi_hazirla(self, df, kisa, uzun, tur):
-        if len(df) < uzun: return None
+    def veriyi_hazirla(self, df):
+        # 1. Hareketli Ortalamalar (Trend)
+        df.ta.sma(length=50, append=True)  # Orta Vade
+        df.ta.sma(length=200, append=True) # Uzun Vade (Ana Trend)
         
-        # Hareketli Ortalamalar
-        if tur == "SMA":
-            df.ta.sma(length=kisa, append=True)
-            df.ta.sma(length=uzun, append=True)
-            df['MA_Short'] = df[f'SMA_{kisa}']
-            df['MA_Long'] = df[f'SMA_{uzun}']
-        else:
-            df.ta.ema(length=kisa, append=True)
-            df.ta.ema(length=uzun, append=True)
-            df['MA_Short'] = df[f'EMA_{kisa}']
-            df['MA_Long'] = df[f'EMA_{uzun}']
-
-        # Göstergeler
+        # 2. Trend Gücü (ADX - Ali Perşembe Kuralı)
+        df.ta.adx(length=14, append=True) 
+        
+        # 3. Volatilite ve Stop (ATR)
         df.ta.atr(length=14, append=True)
-        df.ta.adx(length=14, append=True)
-        df.ta.rsi(length=14, append=True)
-        df.ta.bbands(length=20, std=2, append=True)
         
-        # Hacim Ortalaması
+        # 4. Momentum
+        df.ta.rsi(length=14, append=True)
+        
+        # 5. Hacim Ortalaması
         df['Vol_SMA'] = df['Volume'].rolling(20).mean()
         
         return df.dropna()
 
-    def sinyal_uret(self, df, atr_kat):
-        trades = []
-        in_pos = False
-        stop_loss = 0.0
-        live_status = "NÖTR"
-        live_stop = 0.0
+    def analiz_et(self, df):
+        son = df.iloc[-1]
         
-        # Backtest Döngüsü
-        for i in range(1, len(df)):
-            row = df.iloc[i]
-            prev = df.iloc[i-1]
-            
-            # Sinyal Koşulları
-            trend_up = row['MA_Short'] > row['MA_Long']
-            trend_down = row['MA_Short'] < row['MA_Long']
-            rsi_uygun = row['RSI_14'] < 70
-            
-            # Alım
-            if not in_pos and trend_up and rsi_uygun:
-                in_pos = True
-                stop_loss = row['Close'] - (row['ATRr_14'] * atr_kat)
-                trades.append({'tarih': str(row.name.date()), 'islem': 'ALIŞ', 'fiyat': row['Close'], 'sonuc': 0})
-                live_status = "ALIMDA"
-                live_stop = stop_loss
-            
-            # Satış / Stop
-            elif in_pos:
-                stop_oldu = row['Low'] < stop_loss
-                trend_dondu = trend_down
-                
-                if stop_oldu or trend_dondu:
-                    in_pos = False
-                    cikis_fiyati = stop_loss if stop_oldu else row['Close']
-                    # Kar/Zarar Hesapla
-                    giris_fiyati = trades[-1]['fiyat']
-                    pnl = (cikis_fiyati - giris_fiyati) / giris_fiyati
-                    
-                    trades.append({'tarih': str(row.name.date()), 'islem': 'SATIŞ', 'fiyat': cikis_fiyati, 'sonuc': round(pnl*100, 2)})
-                    live_status = "NÖTR"
-                else:
-                    # İz Süren Stop (Trailing Stop)
-                    new_stop = row['Close'] - (row['ATRr_14'] * atr_kat)
-                    if new_stop > stop_loss: stop_loss = new_stop
-                    live_stop = stop_loss
+        # Değerler
+        fiyat = son['Close']
+        sma50 = son['SMA_50']
+        sma200 = son['SMA_200']
+        adx = son.get('ADX_14', 0)
+        atr = son.get('ATRr_14', 0)
+        rsi = son.get('RSI_14', 50)
         
-        return trades, live_status, live_stop
+        nedenler = []
+        puan = 0
+        
+        # --- STRATEJİ MANTIĞI ---
+        
+        # 1. Trend Yönü (Golden Cross / Death Cross)
+        if sma50 > sma200:
+            puan += 1
+            nedenler.append(f"✅ Altın Kesişim (Golden Cross): 50 G.O ({sma50:.2f}) > 200 G.O")
+        else:
+            puan -= 1
+            nedenler.append(f"🔻 Ölüm Kesişimi (Death Cross): Uzun vade trend düşüşte.")
+            
+        # 2. Fiyatın Ortalamaya Göre Konumu
+        if fiyat > sma50:
+            puan += 1
+            nedenler.append(f"✅ Fiyat ({fiyat:.2f}), 50 Günlük ortalamanın üzerinde.")
+        else:
+            nedenler.append(f"⚠️ Fiyat ortalamaların altında baskılanıyor.")
 
-def detayli_yorum(df, status, stop):
-    son = df.iloc[-1]
-    return {
-        "trend_mesaj": "Yükseliş Trendi 🐂" if son['MA_Short'] > son['MA_Long'] else "Düşüş Trendi 🐻",
-        "trend_yonu": "UP" if son['MA_Short'] > son['MA_Long'] else "DOWN",
-        "aksiyon_mesaj": f"Sistem şu an {status}. Stop: {stop:.2f}" if status == "ALIMDA" else "Nakitte bekle.",
-        "hacim_mesaj": "Hacim Ortalamanın Üstünde 🔥" if son['Volume'] > son['Vol_SMA'] else "Hacim Zayıf",
-        "sikisma_mesaj": None
-    }
+        # 3. Trend Gücü (ADX)
+        if adx > 25:
+            nedenler.append(f"🔥 Trend Güçlü (ADX: {adx:.0f} > 25).")
+        else:
+            puan -= 0.5 
+            nedenler.append(f"💤 Trend Zayıf/Yatay (ADX: {adx:.0f}). Testere piyasası riski.")
+            
+        # 4. RSI Durumu
+        if rsi < 30:
+            puan += 1
+            nedenler.append(f"⚡ RSI ({rsi:.0f}) aşırı satışta. Tepki alımı gelebilir.")
+        elif rsi > 70:
+            nedenler.append(f"⚠️ RSI ({rsi:.0f}) aşırı ısındı. Kar satışı gelebilir.")
+        else:
+            nedenler.append(f"ℹ️ RSI ({rsi:.0f}) nötr bölgede.")
+
+        # KARAR
+        durum = "NÖTR"
+        renk = "GRAY"
+        
+        if puan >= 2:
+            durum = "ALIMDA"
+            renk = "GREEN"
+        elif puan <= -1:
+            durum = "SATIMDA"
+            renk = "RED"
+            
+        # ATR Trailing Stop (Ali Perşembe Stili)
+        # Fiyatın 2 ATR altı stop seviyesidir
+        stop_seviyesi = fiyat - (atr * 2) 
+        if stop_seviyesi < 0: stop_seviyesi = 0
+
+        return {
+            "durum": durum,
+            "renk": renk,
+            "stop_seviyesi": round(stop_seviyesi, 2),
+            "detay": {
+                "trend_mesaj": "Boğa Piyasası 🐂" if sma50 > sma200 else "Ayı Piyasası 🐻",
+                "trend_yonu": "UP" if sma50 > sma200 else "DOWN",
+                "aksiyon_mesaj": " | ".join(nedenler), # iOS bunu parçalayacak
+                "hacim_mesaj": "Hacim Yüksek" if son['Volume'] > son['Vol_SMA'] else "Hacim Düşük",
+                "sikisma_mesaj": None
+            }
+        }
 
 # ==========================================
-# 4. ENDPOINTS (KAPI NUMARALARI)
+# 5. ENDPOINTS
 # ==========================================
 @app.get("/")
-def home(): return {"mesaj": "API V28.0 Aktif 🚀"}
+def home(): return {"mesaj": "API V36.0 (Full Paket) Aktif 🚀"}
 
 @app.get("/analiz")
-def analiz_yap(sembol: str, piyasa: str = "BIST", profil: str = "Trader"):
-    # 1. Profil Ayarları
-    if profil == "Scalper": p_set = ("EMA", 9, 21, 1.5, "6mo")
-    elif profil == "Trader": p_set = ("SMA", 50, 200, 2.5, "2y")
-    else: p_set = ("SMA", 100, 200, 3.5, "5y")
-    
-    ma, kisa, uzun, atr, vade = p_set
-    
-    # 2. Sembol Düzeltme
+def analiz_yap(sembol: str, piyasa: str = "BIST"):
     s = sembol.upper()
-    if piyasa == "BIST" and not s.endswith(".IS"): s += ".IS"
-    elif piyasa == "Kripto" and not s.endswith("-USD"): s += "-USD"
-    elif piyasa == "Emtia":
-        d = {"ALTIN": "GC=F", "PETROL": "CL=F", "GÜMÜŞ": "SI=F"}
-        if s in d: s = d[s]
-
+    df = None
+    
     try:
-        # 3. Veri Çek
-        df = yf.Ticker(s).history(period=vade, interval="1d")
-        if df.empty: raise HTTPException(status_code=404, detail="Veri yok")
+        # --- VERİ KAYNAĞI SEÇİMİ ---
+        if piyasa == "Fon" or piyasa == "Fonlar":
+            motor = FonMotoru()
+            df = motor.getir(s)
+            if df is None: raise HTTPException(status_code=404, detail="Fon bulunamadı")
+            
+        else:
+            # Yfinance Mapping (Sembol Eşleştirme)
+            ticker = s
+            if piyasa == "BIST" and not s.endswith(".IS"): ticker = f"{s}.IS"
+            elif piyasa == "ABD": ticker = s 
+            elif piyasa == "Kripto" and not s.endswith("-USD"): ticker = f"{s}-USD"
+            elif piyasa == "Emtia":
+                map_emtia = {"ALTIN": "GC=F", "GÜMÜŞ": "SI=F", "PETROL": "CL=F", "DOĞALGAZ": "NG=F", "BAKIR": "HG=F"}
+                if s in map_emtia: ticker = map_emtia[s]
+            elif piyasa == "Endeksler":
+                map_endeks = {
+                    "BIST 100": "XU100.IS", "BIST 30": "XU030.IS", "BANKA": "XBANK.IS",
+                    "S&P 500": "^GSPC", "NASDAQ": "^IXIC", "DOW JONES": "^DJI", "DAX": "^GDAXI", "VIX": "^VIX"
+                }
+                if s in map_endeks: ticker = map_endeks[s]
+            
+            # Veriyi Çek (2 Yıllık - 200 günlük ortalama için şart)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
         
-        # 4. Analiz Et
-        motor = AnalizMotoru()
-        df = motor.veriyi_hazirla(df, kisa, uzun, ma)
-        trades, status, stop = motor.sinyal_uret(df, atr)
-        yorum = detayli_yorum(df, status, stop)
-        
-        # 5. Grafik Verisi (Son 60 gün - iOS Charts için)
-        grafik = [{"tarih": str(r['Date'].date()), "close": r['Close']} for _, r in df.tail(60).reset_index().iterrows()]
-        
-        # 6. Backtest Özeti Hesapla
-        karli = [t for t in trades if t['islem'] == 'SATIŞ' and t['sonuc'] > 0]
-        tum_satis = [t for t in trades if t['islem'] == 'SATIŞ']
-        basari = 0.0
-        toplam_getiri = sum([t['sonuc'] for t in tum_satis])
-        
-        if tum_satis: basari = (len(karli) / len(tum_satis)) * 100
+        if df is None or df.empty: raise HTTPException(status_code=404, detail="Veri yok")
 
-        # 7. Sonuç Dön
+        # --- ANALİZ ---
+        motor = AnalizMotoru()
+        df = motor.veriyi_hazirla(df)
+        sonuc = motor.analiz_et(df)
+        
+        # --- GRAFİK VERİSİ (Son 90 Gün) ---
+        grafik = [{"tarih": str(r.name.date()), "close": r['Close']} for _, r in df.tail(90).iterrows()]
+
         return {
             "sembol": s,
             "fiyat": round(df['Close'].iloc[-1], 2),
-            "analiz": {"durum": status, "stop_seviyesi": round(stop, 2), "detay": yorum},
-            "backtest": {"toplam_islem": len(trades), "basari_orani": round(basari, 1), "toplam_getiri": round(toplam_getiri, 1)},
+            "analiz": sonuc,
             "grafik_verisi": grafik
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
